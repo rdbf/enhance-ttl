@@ -1,2 +1,2 @@
 # enhance-ttl
-Change default TTL settings in Enhance for one or all domains via the API
+Change default TTL settings via the API for one or all domains for an Enhance Hosting Control Panel cluster.
