@@ -163,7 +163,8 @@ def process_domains_for_org(base_url, org_id, org_name, ttl_map, domain_filter, 
         stats['errors'] += 1
 
 # Read config file
-config_path = os.path.expanduser('~/enhance-ttl.conf')
+script_dir = os.path.dirname(os.path.realpath(__file__))
+config_path = os.path.join(script_dir, 'enhance-ttl.conf')
 config = parse_config(config_path)
 
 # Get configuration values
