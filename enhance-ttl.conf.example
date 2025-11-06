@@ -1,0 +1,18 @@
+# Hosting Panel URL with "/api"
+BASE_URL = "https://putyourdomainhere.com/api"
+
+# API key data from API key generated in Enhance interface
+ORG_ID = ""
+ACCESS_TOKEN = ""
+
+# Domains to update, "ALL" for all domains
+DOMAIN = "ALL"
+
+# TTL for DNS record type. Supported types are: A, AAAA, MX, NS, CNAME, TXT, SRV.
+TTL_A = 3600
+TTL_AAAA = 3600
+TTL_MX = 3600
+TTL_NS = 3600
+TTL_CNAME = 21600
+TTL_TXT = 10800
+TTL_SRV = 86400
