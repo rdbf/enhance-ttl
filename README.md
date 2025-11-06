@@ -44,6 +44,7 @@ TTL_SRV = 86400
 
 ## Installation and Usage
 
+You will need to run this script on only one server in your cluster, or on any other linux device capable of running this script and communicating with the Control Panel.
 Ensure Python 3 and `requests` library are installed.
 
 As root, run `git clone https://github.com/rdbf/enhance-ttl.git /opt/enhance-ttl` and `chmod +x /opt/enhance-ttl/enhance-ttl`. 
