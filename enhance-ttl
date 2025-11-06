@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+import requests
+import os
+import sys
+import time
+
+def parse_config(config_path):
+    """Parse the configuration file and return a dictionary of config values."""
+    config = {}
+    try:
+        with open(config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        config[key] = value
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {config_path}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading config file: {e}", file=sys.stderr)
+        sys.exit(1)
+    return config
+
+def get_ttls_from_config(config):
+    """Parse TTLs per DNS record type from config, fallback to None if missing."""
+    ttl_map = {}
+    for rtype in ['A', 'AAAA', 'MX', 'NS', 'CNAME', 'TXT', 'SRV']:
+        key = f'TTL_{rtype}'
+        val = config.get(key)
+        if val is not None:
+            try:
+                ttl_map[rtype] = int(val)
+            except ValueError:
+                print(f"Warning: Invalid TTL value for {rtype} in config, ignoring", file=sys.stderr)
+                ttl_map[rtype] = None
+        else:
+            ttl_map[rtype] = None
+    return ttl_map
+
+def get_ttl_for_record_type(record_type, ttl_map):
+    """Return TTL from map or None if record type not configured."""
+    return ttl_map.get(record_type)
+
+def update_record_ttl(base_url, customer_id, website_id, domain_id, record_id, new_ttl, headers, max_retries=3):
+    """Update the TTL for a specific DNS record with retry logic."""
+    url = f"{base_url}/orgs/{customer_id}/websites/{website_id}/domains/{domain_id}/dns-zone/records/{record_id}"
+    payload = {"ttl": new_ttl}
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.patch(url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+            if response.text and response.text.strip():
+                try:
+                    return True, response.json(), False
+                except ValueError:
+                    return True, {"message": "Updated successfully (non-JSON response)"}, False
+            else:
+                return True, {"message": "Updated successfully"}, False
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f" [Retry {attempt + 1}/{max_retries} in {wait_time}s]", end='', flush=True)
+                time.sleep(wait_time)
+            else:
+                # Return with rate_limited flag set to True
+                return False, f"Connection failed after {max_retries} retries: {str(e)}", True
+        except requests.exceptions.RequestException as e:
+            return False, str(e), False
+    
+    return False, "Max retries exceeded", False
+
+def process_domains_for_org(base_url, org_id, org_name, ttl_map, domain_filter, headers, stats, delay_state):
+    """Process all websites and domains for a given organization."""
+    try:
+        websites_response = requests.get(f"{base_url}/orgs/{org_id}/websites", headers=headers)
+        websites_response.raise_for_status()
+        websites_data = websites_response.json()
+        
+        for website in websites_data.get('items', []):
+            website_id = website.get('id')
+            
+            domains_response = requests.get(
+                f"{base_url}/orgs/{org_id}/websites/{website_id}/domains",
+                headers=headers
+            )
+            domains_response.raise_for_status()
+            domains_data = domains_response.json()
+            
+            for domain in domains_data.get('items', []):
+                domain_name = domain.get('domain')
+                domain_id = domain.get('domainId')
+                
+                if domain_filter == 'ALL' or domain_name == domain_filter:
+                    print(f"Processing domain: {domain_name} (Org: {org_name})")
+                    stats['domains_processed'] += 1
+                    
+                    dns_zone_response = requests.get(
+                        f"{base_url}/orgs/{org_id}/websites/{website_id}/domains/{domain_id}/dns-zone",
+                        headers=headers
+                    )
+                    dns_zone_response.raise_for_status()
+                    dns_zone_data = dns_zone_response.json()
+                    
+                    records = dns_zone_data.get('records', [])
+                    
+                    if not records:
+                        print(f"  No records found for {domain_name}")
+                        continue
+                    
+                    for record in records:
+                        record_id = record.get('id')
+                        record_type = record.get('kind')
+                        record_name = record.get('name')
+                        current_ttl = record.get('ttl')
+                        
+                        if not record_id:
+                            print(f"  ⚠ Warning: Could not find record ID for {record_type} record '{record_name}' - skipping")
+                            stats['errors'] += 1
+                            continue
+                        
+                        desired_ttl = get_ttl_for_record_type(record_type, ttl_map)
+                        
+                        if desired_ttl is None:
+                            print(f"  - {record_type:6s} record '{record_name}' (TTL: {current_ttl}s) - ignored (no TTL configured)")
+                            stats['records_ignored'] += 1
+                            continue
+                        
+                        if current_ttl == desired_ttl:
+                            print(f"  ✓ {record_type:6s} record '{record_name}' already has TTL {desired_ttl}s - skipping")
+                            stats['records_skipped'] += 1
+                            continue
+                        
+                        print(f"  → Updating {record_type:6s} record '{record_name}': {current_ttl}s → {desired_ttl}s", end='', flush=True)
+                        success, result, rate_limited = update_record_ttl(
+                            base_url, org_id, website_id, domain_id, 
+                            record_id, desired_ttl, headers
+                        )
+                        
+                        if success:
+                            print(" ✓")
+                            stats['records_updated'] += 1
+                            time.sleep(delay_state['delay'])
+                        else:
+                            print(f" ✗ Error: {result}")
+                            stats['errors'] += 1
+                            
+                            # If we hit rate limiting, permanently slow down
+                            if rate_limited:
+                                old_delay = delay_state['delay']
+                                delay_state['delay'] = old_delay * 2
+                                print(f"  ⚠ Rate limit detected! Slowing down: {old_delay}s → {delay_state['delay']}s delay")
+                                time.sleep(5)  # Extra pause after rate limiting
+                    
+                    print()
+    
+    except requests.exceptions.RequestException as e:
+        print(f"  Error processing org {org_name}: {e}", file=sys.stderr)
+        stats['errors'] += 1
+
+# Read config file
+config_path = os.path.expanduser('~/enhance-ttl.conf')
+config = parse_config(config_path)
+
+# Get configuration values
+BASE_URL = config.get('BASE_URL')
+ORG_ID = config.get('ORG_ID')
+ACCESS_TOKEN = config.get('ACCESS_TOKEN')
+DOMAIN = config.get('DOMAIN', 'ALL')
+
+# Parse TTL values per record type
+ttl_map = get_ttls_from_config(config)
+
+# Validate required config
+if not all([BASE_URL, ORG_ID, ACCESS_TOKEN]):
+    print("Error: Missing required configuration: BASE_URL, ORG_ID, or ACCESS_TOKEN", file=sys.stderr)
+    sys.exit(1)
+
+headers = {
+    "Authorization": f"Bearer {ACCESS_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Delay state - starts at 1 second, can be increased if rate limited
+delay_state = {'delay': 1.0}
+
+print(f"Configuration:")
+print(f"  Domain filter: {DOMAIN}")
+print(f"  Initial delay between updates: {delay_state['delay']}s")
+print(f"  Configured TTL per record type:")
+for rtype in ['A', 'AAAA', 'MX', 'NS', 'CNAME', 'TXT', 'SRV']:
+    ttl = ttl_map.get(rtype)
+    if ttl is not None:
+        print(f"    {rtype:6s}: {ttl}s ({ttl//3600}h {(ttl%3600)//60}m)" if ttl >= 3600 else f"    {rtype:6s}: {ttl}s")
+    else:
+        print(f"    {rtype:6s}: Not configured (will be ignored)")
+print()
+
+# Statistics tracking
+stats = {
+    'domains_processed': 0,
+    'records_updated': 0,
+    'records_skipped': 0,
+    'records_ignored': 0,
+    'errors': 0
+}
+
+try:
+    # Step 1: Process master organization websites first
+    print("Processing master organization websites...")
+    process_domains_for_org(BASE_URL, ORG_ID, "Master Org", ttl_map, DOMAIN, headers, stats, delay_state)
+    
+    # Step 2: Get customers and process their websites
+    print("Fetching customers...")
+    customers_response = requests.get(f"{BASE_URL}/orgs/{ORG_ID}/customers", headers=headers)
+    customers_response.raise_for_status()
+    customers_data = customers_response.json()
+    
+    print(f"Found {len(customers_data.get('items', []))} customers\n")
+
+    # Step 3: Process each customer organization
+    for customer in customers_data.get('items', []):
+        customer_id = customer.get('id')
+        customer_name = customer.get('name', 'Unknown')
+        
+        process_domains_for_org(BASE_URL, customer_id, customer_name, ttl_map, DOMAIN, headers, stats, delay_state)
+
+    # Print summary
+    print("\n" + "="*80)
+    print("SUMMARY")
+    print("="*80)
+    print(f"Domains processed:  {stats['domains_processed']}")
+    print(f"Records updated:    {stats['records_updated']}")
+    print(f"Records skipped:    {stats['records_skipped']} (already at target TTL)")
+    print(f"Records ignored:    {stats['records_ignored']} (not in update list)")
+    print(f"Errors:             {stats['errors']}")
+    print(f"Final delay used:   {delay_state['delay']}s")
+    print("="*80)
+
+except requests.exceptions.RequestException as e:
+    print(f"\nAPI request failed: {e}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"\nUnexpected error: {e}", file=sys.stderr)
+    sys.exit(1)
