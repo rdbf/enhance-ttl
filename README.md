@@ -75,3 +75,4 @@ Add this to run it once a day at 02:00
 - The script adds delays between API calls to respect rate limits, automatically slowing down if needed.
 - Records with types not configured in the TTL settings will be ignored.
 - The script handles both master organization and customer domains to ensure all relevant DNS zones are updated.
+- Tested compatibility up to and including v12.12.0, where custom Default TTL settings were introduced in Enhance.
