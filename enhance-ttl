@@ -45,10 +45,10 @@ def get_ttl_for_record_type(record_type, ttl_map):
     """Return TTL from map or None if record type not configured."""
     return ttl_map.get(record_type)
 
-def update_record_ttl(base_url, customer_id, website_id, domain_id, record_id, new_ttl, headers, max_retries=3):
+def update_record_ttl(base_url, customer_id, website_id, domain_id, record_id, new_ttl, proxy, headers, max_retries=3):
     """Update the TTL for a specific DNS record with retry logic."""
     url = f"{base_url}/orgs/{customer_id}/websites/{website_id}/domains/{domain_id}/dns-zone/records/{record_id}"
-    payload = {"ttl": new_ttl}
+    payload = {"ttl": new_ttl, "proxy": proxy}
     
     for attempt in range(max_retries):
         try:
@@ -117,6 +117,7 @@ def process_domains_for_org(base_url, org_id, org_name, ttl_map, domain_filter, 
                         record_type = record.get('kind')
                         record_name = record.get('name')
                         current_ttl = record.get('ttl')
+                        record_proxy = record.get('proxy', False)
                         
                         if not record_id:
                             print(f"  ⚠ Warning: Could not find record ID for {record_type} record '{record_name}' - skipping")
@@ -138,7 +139,7 @@ def process_domains_for_org(base_url, org_id, org_name, ttl_map, domain_filter, 
                         print(f"  → Updating {record_type:6s} record '{record_name}': {current_ttl}s → {desired_ttl}s", end='', flush=True)
                         success, result, rate_limited = update_record_ttl(
                             base_url, org_id, website_id, domain_id, 
-                            record_id, desired_ttl, headers
+                            record_id, desired_ttl, record_proxy, headers
                         )
                         
                         if success:
